@@ -1,0 +1,28 @@
+---
+BasedOnStyle: WebKit
+AllowShortFunctionsOnASingleLine: InlineOnly
+ColumnLimit: 120
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Standard C headers
+  - Regex: '^(<|")c(assert|complex|ctype|errno|fenv|float|inttypes|iso646|limits|locale|math|setjmp|signal|stdalign|stdarg|stdatomic|stdbit|stdbool|stdckdint|stddef|stdint|stdio|stdlib|stdnoreturn|string|tgmath|threads|time|uchar|wchar|wctype)(>|")'
+    Priority: 5
+  - Regex: '^(<|")(assert|complex|ctype|errno|fenv|float|inttypes|iso646|limits|locale|math|setjmp|signal|stdalign|stdarg|stdatomic|stdbit|stdbool|stdckdint|stddef|stdint|stdio|stdlib|stdnoreturn|string|tgmath|threads|time|uchar|wchar|wctype).h(>|")'
+    Priority: 5
+  - Regex: '^(<|")sys/(acct|auxv|bitypes|cdefs|debugreg|dir|elf|epoll|errno|eventfd|fanotify|fcntl|file|fsuid|gmon|gmon_out|inotify|io|ioctl|ipc|kd|klog|mman|mount|msg|mtio|param|pci|perm|personality|platform|platform/x86|poll|prctl|procfs|profil|ptrace|queue|quota|random|raw|reboot|reg|resource|rseq|select|sem|sendfile|shm|signal|signalfd|single_threaded|socket|socketvar|soundcard|stat|statfs|statvfs|swap|syscall|sysinfo|syslog|sysmacros|termios|time|timeb|timerfd|times|timex|ttychars|ttydefaults|types|ucontext|uio|un|unistd|user|utsname|vfs|vlimit|vm86|vt|wait|xattr).h(>|")'
+    Priority: 5
+  - Regex: '^(<|")(aio|aliases|alloca|ar|argp|argz|arpa|arpa/ftp|arpa/inet|arpa/nameser|arpa/nameser_compat|arpa/telnet|arpa/tftp|byteswap|cpio|dirent|dlfcn|elf|endian|envz|err|error|execinfo|fcntl|features-time64|features|finclude|finclude/math-vector-fortran|fmtmsg|fnmatch|fstab|fts|ftw|gconv|getopt|glob|gnu-versions|grp|gshadow|iconv|ifaddrs|langinfo|lastlog|libgen|libintl|link|malloc|mcheck|memory|mntent|monetary|mqueue|net|net/ethernet|net/if|net/if_arp|net/if_packet|net/if_ppp|net/if_shaper|net/if_slip|net/ppp-comp|net/ppp_defs|net/route|netash|netash/ash|netatalk|netatalk/at|netax25|netax25/ax25|netdb|neteconet|neteconet/ec|netinet|netinet/ether|netinet/icmp6|netinet/if_ether|netinet/if_fddi|netinet/if_tr|netinet/igmp|netinet/in|netinet/in_systm|netinet/ip|netinet/ip6|netinet/ip_icmp|netinet/tcp|netinet/udp|netipx|netipx/ipx|netiucv|netiucv/iucv|netpacket|netpacket/packet|netrom|netrom/netrom|netrose|netrose/rose|nfs|nfs/nfs|nl_types|nss|obstack|paths|poll|printf|proc_service|protocols|protocols/routed|protocols/rwhod|protocols/talkd|protocols/timed|pthread|pty|pwd|re_comp|regex|regexp|resolv|rpc|rpc/netdb|sched|scsi|scsi/scsi|scsi/scsi_ioctl|scsi/sg|search|semaphore|sgtty|shadow|spawn|stab|stdc-predef|stdio_ext|strings|syscall|sysexits|syslog|tar|termio|termios|thread_db|ttyent|ucontext|ulimit|unistd|utime|utmp|utmpx|values|wait|wordexp).h(>|")'
+    Priority: 5
+  # Standard C++ headers (without extension).
+  - Regex: '^<([A-Za-z0-9\Q/-_\E])+>'
+    Priority: 4
+  # Headers from almost-standard libraries.
+  - Regex: '^(<|")(boost|gtest|gmock).*(>|")'
+    Priority: 3
+  # Headers in <> with extension.
+  - Regex: '<([A-Za-z0-9.\Q/-_\+\E])+>'
+    Priority: 2
+  # Headers in "" with extension.
+  - Regex: '"([A-Za-z0-9.\Q/-_\+\E])+"'
+    Priority: 1
+---

@@ -1,6 +1,7 @@
 #pragma once
 
 #ifdef _MSC_VER
+// Hack for ASIO compatibility with MSVC
 #include <cstdlib>
 namespace std {
 using ::_strtoui64;
@@ -33,34 +34,37 @@ public:
     ~MessagingServiceImpl() noexcept override;
     MessagingServiceImpl(const MessagingServiceImpl&) = delete;
     MessagingServiceImpl& operator=(const MessagingServiceImpl&) = delete;
+    MessagingServiceImpl(MessagingServiceImpl&&) = delete;
+    MessagingServiceImpl& operator=(MessagingServiceImpl&&) = delete;
 
     void run() override;
     [[nodiscard]] std::string peerName() const override;
-    std::future<std::string> sendRequest(
+    std::future<Message> sendRequest(
         std::string peerName, std::string request, std::chrono::milliseconds timeout) override;
-    std::future<std::string> sendRequest(
-        std::string peerName, Message request, std::chrono::milliseconds timeout) override;
-    void setMessageHandler(std::function<std::string(const std::string&)> messageHandler) override;
+    std::future<Message> sendRequest(std::string peerName, Message request, std::chrono::milliseconds timeout) override;
+    void publish(std::string topic, Message) override;
+    void setRequestHandler(RequestHandler) override;
+    void subscribeToTopic(std::string topic, SubscriptionHandler) override;
 
 private:
-    using ResponseChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, std::string)>;
+    using ResponseChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, Message)>;
 
     template <boost::asio::completion_token_for<void(boost::system::error_code, zyre_event_t*)> CompletionToken>
     auto async_zyre_event_new(zyre_t* node, CompletionToken&&);
 
     boost::asio::awaitable<void> handleEvents();
     [[nodiscard]] boost::asio::awaitable<Event> asyncReceiveEvent();
-    [[nodiscard]] boost::asio::awaitable<std::string> asyncSendReceive(
+    [[nodiscard]] boost::asio::awaitable<Message> asyncSendReceive(
         std::string peerName, Message request, std::chrono::milliseconds timeout);
+    boost::asio::awaitable<void> asyncPublish(std::string topic, Message);
 
     void sendMessage(std::string peerUuid, Message) const;
     void handleResponse(Message response);
-    void handleRequest(const std::string& peerUuid, Message requestAndResponse) const;
+    void handleRequest(const std::string& peerUuid, Message request) const;
 
-    static boost::asio::awaitable<std::string> waitForResponse(ResponseChannel&);
+    static boost::asio::awaitable<Message> waitForResponse(ResponseChannel&);
     static boost::asio::awaitable<void> waitForTimeout(std::chrono::milliseconds);
     static void addStringToMessage(zmsg_t*, std::string_view);
-    [[nodiscard]] static Message::Uuid generateUuid();
 
     boost::asio::io_context m_ioContext;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_workGuard;
@@ -70,9 +74,10 @@ private:
     std::string m_peerName;
     zyre_t* m_node;
     bool m_verbose;
-    std::unordered_map<Message::Uuid, ResponseChannel> m_requestChannels;
-    std::unordered_map<std::string, std::string> m_nameIdMap;
-    std::function<std::string(const std::string&)> m_messageHandler;
+    std::unordered_map<Message::Uuid, ResponseChannel> m_pendingResponseChannels;
+    std::unordered_map<std::string, SubscriptionHandler> m_subscriptionHandlers;
+    std::unordered_map<std::string, std::string> m_peersAvailable;
+    RequestHandler m_requestHandler;
 
     static constexpr auto eventStringToEventType(std::string_view eventString)
     {

@@ -20,7 +20,6 @@ if (MINGW)
     target_link_libraries(asio INTERFACE ws2_32)
 endif()
 
-#CPMAddPackage("gh:nlohmann/json@3.11.3")
 CPMAddPackage("gh:google/googletest@1.13.0")
 
 find_package(zyre REQUIRED)

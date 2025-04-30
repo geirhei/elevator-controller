@@ -37,11 +37,10 @@ MessagingServiceImpl::MessagingServiceImpl(const std::string_view name, const bo
         try {
             const auto numHandlersExecuted = m_ioContext.run();
             if (m_verbose)
-                std::cout << std::format(
-                    "Messaging service {} stopped gracefully ({} handlers executed)", m_peerName, numHandlersExecuted)
-                          << std::endl;
+                std::println(std::cout, "Messaging service {} stopped gracefully ({} handlers executed)", m_peerName,
+                    numHandlersExecuted);
         } catch (const std::exception& e) {
-            std::cerr << std::format("Unexpected error in run thread: {}", e.what()) << std::endl;
+            std::println(std::cerr, "Unexpected error in run thread: {}", e.what());
         }
     } };
 }
@@ -70,26 +69,35 @@ std::string MessagingServiceImpl::peerName() const
     return m_peerName;
 }
 
-std::future<std::string> MessagingServiceImpl::sendRequest(
+std::future<Message> MessagingServiceImpl::sendRequest(
     std::string peerName, std::string request, std::chrono::milliseconds timeout)
 {
-    Message messageToSend {
-        .uuid = {},
-        .payload = { std::move(request) },
-    };
-    return sendRequest(std::move(peerName), std::move(messageToSend), std::move(timeout));
+    return sendRequest(std::move(peerName), Message { { std::move(request) } }, timeout);
 }
 
-std::future<std::string> MessagingServiceImpl::sendRequest(
+std::future<Message> MessagingServiceImpl::sendRequest(
     std::string peerName, Message request, std::chrono::milliseconds timeout)
 {
     return co_spawn(
         m_ioContext, asyncSendReceive(std::move(peerName), std::move(request), std::move(timeout)), asio::use_future);
 }
 
-void MessagingServiceImpl::setMessageHandler(std::function<std::string(const std::string&)> messageHandler)
+void MessagingServiceImpl::publish(std::string topic, Message message)
 {
-    m_messageHandler = messageHandler;
+    co_spawn(m_ioContext, asyncPublish(std::move(topic), std::move(message)), asio::detached);
+}
+
+void MessagingServiceImpl::subscribeToTopic(std::string topic, SubscriptionHandler handler)
+{
+    post(m_ioContext, [this, topic = std::move(topic), handler = std::move(handler)]() mutable {
+        const auto& [topicEntry, _] = m_subscriptionHandlers.insert_or_assign(std::move(topic), std::move(handler));
+        zyre_join(m_node, topicEntry->first.c_str());
+    });
+}
+
+void MessagingServiceImpl::setRequestHandler(const RequestHandler requestHandler)
+{
+    m_requestHandler = requestHandler;
 }
 
 asio::awaitable<Event> MessagingServiceImpl::asyncReceiveEvent()
@@ -107,14 +115,20 @@ asio::awaitable<Event> MessagingServiceImpl::asyncReceiveEvent()
         .peerUuid { zyre_event_peer_uuid(zyreEvent) },
     };
 
-    if (event.type == Event::EventType::Whisper) {
-        zmsg_t* zmsg = zyre_event_msg(zyreEvent);
-        zframe_t* currentFrame = zmsg_first(zmsg);
+    if (event.type == Event::EventType::Whisper || event.type == Event::EventType::Shout) {
+        if (event.type == Event::EventType::Shout)
+            event.groupName.emplace(zyre_event_group(zyreEvent));
 
-        auto& [_, payload] = event.message.emplace(zframe_strdup(currentFrame), std::vector<Message::Frame> {});
+        zmsg_t* zyreMessage = zyre_event_msg(zyreEvent);
+        zframe_t* currentFrame = zmsg_first(zyreMessage);
 
-        while ((currentFrame = zmsg_next(zmsg)) != nullptr)
+        Message::Uuid uuid { zframe_strdup(currentFrame) };
+
+        Message::Payload payload {};
+        while ((currentFrame = zmsg_next(zyreMessage)) != nullptr)
             payload.emplace_back(reinterpret_cast<char*>(zframe_data(currentFrame)), zframe_size(currentFrame));
+
+        event.message.emplace(std::move(uuid), std::move(payload));
     }
 
     zyre_event_destroy(&zyreEvent);
@@ -127,16 +141,21 @@ asio::awaitable<void> MessagingServiceImpl::handleEvents()
         throw MessagingError { std::format("Failed to start zyre node {}", zyre_name(m_node)) };
 
     for (;;) {
-        switch (auto [type, peerName, peerUuid, message] = co_await asyncReceiveEvent(); type) {
+        switch (auto [type, peerName, peerUuid, groupName, message] = co_await asyncReceiveEvent(); type) {
         case Event::EventType::Enter:
-            m_nameIdMap[peerName] = peerUuid;
+            m_peersAvailable.insert_or_assign(peerName, std::move(peerUuid));
             break;
         case Event::EventType::Exit:
         case Event::EventType::Stop:
-            m_nameIdMap.erase(peerName);
+            m_peersAvailable.erase(peerName);
+            break;
+        case Event::EventType::Shout:
+            if (auto handlerEntry = m_subscriptionHandlers.find(*groupName);
+                handlerEntry != m_subscriptionHandlers.end())
+                handlerEntry->second(std::move(*message));
             break;
         case Event::EventType::Whisper:
-            if (m_requestChannels.contains(message->uuid))
+            if (m_pendingResponseChannels.contains(message->uuid()))
                 handleResponse(std::move(*message));
             else
                 handleRequest(peerUuid, std::move(*message));
@@ -147,38 +166,55 @@ asio::awaitable<void> MessagingServiceImpl::handleEvents()
     }
 }
 
-asio::awaitable<std::string> MessagingServiceImpl::asyncSendReceive(
+asio::awaitable<Message> MessagingServiceImpl::asyncSendReceive(
     std::string peerName, Message request, std::chrono::milliseconds timeout)
 {
-    const auto peerUuidIter = m_nameIdMap.find(peerName);
-    if (peerUuidIter == m_nameIdMap.end())
+    const auto peerUuidIter = m_peersAvailable.find(peerName);
+    if (peerUuidIter == m_peersAvailable.end())
         throw MessagingError { std::format("Failed to send request: Unknown peer name {}", peerName) };
 
-    if (request.payload.size() > 1)
+    if (request.payload().size() > 1)
         throw MessagingError { std::format(
-            "Failed to send request: Only one payload is allowed in a message, got {}", request.payload.size()) };
+            "Failed to send request: Only one payload is allowed in a message, got {}", request.payload().size()) };
 
-    if (request.uuid.empty())
-        request.uuid = generateUuid();
-
-    const auto [requestChannelEntry, _] = m_requestChannels.emplace(request.uuid, m_ioContext);
+    const auto [responseChannelEntry, _] = m_pendingResponseChannels.emplace(request.uuid(), m_ioContext);
 
     sendMessage(peerUuidIter->second, std::move(request));
 
-    const std::variant<std::string, std::monostate> result
-        = co_await (waitForResponse(requestChannelEntry->second) || waitForTimeout(timeout));
+    const std::variant<Message, std::monostate> result
+        = co_await (waitForResponse(responseChannelEntry->second) || waitForTimeout(timeout));
 
-    requestChannelEntry->second.close();
-    m_requestChannels.erase(requestChannelEntry);
+    responseChannelEntry->second.close();
+    m_pendingResponseChannels.erase(responseChannelEntry);
 
-    // If the result contains a value, we return the response data. Otherwise, we have timed out.
+    // If the result contains a message, we return it. Otherwise, we have timed out.
     if (result.index() == 0)
         co_return std::get<0>(result);
 
     throw RequestTimedOutError { std::format("Request timed out after {}", timeout) };
 }
 
-asio::awaitable<std::string> MessagingServiceImpl::waitForResponse(ResponseChannel& channel)
+asio::awaitable<void> MessagingServiceImpl::asyncPublish(std::string topic, Message message)
+{
+    zmsg_t* zyreMessage = zmsg_new();
+
+    try {
+        addStringToMessage(zyreMessage, std::move(message.uuid()));
+        for (auto& frame : std::move(message.payload()))
+            addStringToMessage(zyreMessage, std::move(frame));
+    } catch (const MessagingError& e) {
+        std::println(std::cerr, "Failed to create message for publishing to topic {}: {}", topic, e.what());
+        if (zyreMessage != nullptr)
+            zmsg_destroy(&zyreMessage);
+        co_return;
+    }
+
+    if (const int rc = zyre_shout(m_node, topic.c_str(), &zyreMessage); rc != 0)
+        std::println(std::cerr, "Failed to publish message to topic {}", topic);
+    co_return;
+}
+
+asio::awaitable<Message> MessagingServiceImpl::waitForResponse(ResponseChannel& channel)
 {
     co_return co_await channel.async_receive(asio::use_awaitable);
 }
@@ -196,42 +232,30 @@ void MessagingServiceImpl::addStringToMessage(zmsg_t* msg, std::string_view stri
 
 void MessagingServiceImpl::sendMessage(std::string peerUuid, Message message) const
 {
-    zmsg_t* msg = zmsg_new();
+    zmsg_t* zyreMessage = zmsg_new();
 
-    addStringToMessage(msg, std::move(message.uuid));
-    for (auto& frame : std::move(message.payload))
-        addStringToMessage(msg, std::move(frame));
+    addStringToMessage(zyreMessage, std::move(message.uuid()));
+    for (auto& frame : std::move(message.payload()))
+        addStringToMessage(zyreMessage, std::move(frame));
 
-    if (const int rc = zyre_whisper(m_node, peerUuid.c_str(), &msg); rc != 0)
+    if (const int rc = zyre_whisper(m_node, peerUuid.c_str(), &zyreMessage); rc != 0)
         throw MessagingError { std::format("Failed to send message to peer UUID {}", peerUuid) };
 }
 
 void MessagingServiceImpl::handleResponse(Message response)
 {
     if (const auto sendOk
-        = m_requestChannels.at(response.uuid).try_send(system::error_code {}, std::move(response.payload.front()));
+        = m_pendingResponseChannels.at(response.uuid()).try_send(system::error_code {}, std::move(response));
         !sendOk)
         throw MessagingError { "Failed to put response into channel" };
 }
 
-void MessagingServiceImpl::handleRequest(const std::string& peerUuid, Message requestAndResponse) const
+void MessagingServiceImpl::handleRequest(const std::string& peerUuid, Message request) const
 {
-    if (!m_messageHandler) {
-        std::cout << "No message handler set, dropping request" << std::endl;
+    if (!m_requestHandler) {
+        std::println(std::cout, "No message handler set, dropping request");
         return;
     }
-
-    std::string requestPayload = std::move(requestAndResponse.payload.front());
-    std::string responsePayload = m_messageHandler(std::move(requestPayload));
-
-    requestAndResponse.payload = std::vector { std::move(responsePayload) };
-    sendMessage(peerUuid, std::move(requestAndResponse));
-}
-
-Message::Uuid MessagingServiceImpl::generateUuid()
-{
-    zuuid_t* zuuid = zuuid_new();
-    const Message::Uuid uuid { zuuid_str(zuuid) };
-    zuuid_destroy(&zuuid);
-    return uuid;
+    Message response = m_requestHandler(std::move(request));
+    sendMessage(peerUuid, std::move(response));
 }
